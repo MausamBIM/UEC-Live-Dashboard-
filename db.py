@@ -233,10 +233,11 @@ class DatabaseManager:
         with self as conn:
             cursor = conn.cursor()
             for table in ["branches", "customers", "calling_reports", "marketing_reports", "payment_followups"]:
-                cursor.execute(f"SELECT 1 FROM {table} LIMIT 1")
-                if cursor.fetchone():
-                    return False
-        return True
+                cursor.execute(f"SELECT COUNT(1) FROM {table}")
+                count = cursor.fetchone()[0]
+                if count == 0:
+                    return True
+        return False
 
     def insert_sample_data(self, replace: bool = False):
         """Insert cleaned sample data from CSV into normalized tables."""
@@ -267,8 +268,9 @@ class DatabaseManager:
 
                 for _, row in customers.iterrows():
                     cursor.execute(
-                        "INSERT INTO customers (company_name, address, contact_name, primary_mobile, secondary_mobile, email, pan_no, vat_no) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        "INSERT INTO customers (id, company_name, address, contact_name, primary_mobile, secondary_mobile, email, pan_no, vat_no) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (
+                            int(row.get("id", 0)),
                             row.get("company_name", ""),
                             row.get("address", ""),
                             row.get("contact_name", ""),
