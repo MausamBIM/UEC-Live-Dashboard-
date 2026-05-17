@@ -10,6 +10,7 @@ from datetime import datetime
 
 import pandas as pd
 import plotly.express as px
+import requests
 import streamlit as st
 from streamlit.runtime.scriptrunner import RerunException
 from streamlit.runtime.scriptrunner_utils.script_requests import RerunData
@@ -21,6 +22,133 @@ from utils import setup_logging, format_currency, handle_error, DataProcessor
 
 # Configure logging early so helper functions can log if needed.
 logger = logging.getLogger(__name__)
+
+# Public Google Sheet URL (calling data) - used to fetch Kathmandu calling data
+GOOGLE_SHEET_CALLING_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vT9HPxS8RKvHXg5Jx79yN6CmcRDtr_GQCyPhsS1xX7gEMTF0CRKGPNglI7urvtto8-AE77LiuDkCIfJ/pub?output=xlsx"
+
+
+def fetch_calling_from_sheet(url: str) -> pd.DataFrame:
+    """Fetch the first table from a published Google Sheets URL and return as DataFrame.
+
+    Supports both `pubhtml` and `output=xlsx` URLs.
+    Returns an empty DataFrame on failure.
+    """
+    def _clean_columns(frame: pd.DataFrame) -> pd.DataFrame:
+        frame.columns = [str(c).strip() for c in frame.columns]
+        return frame
+
+    try:
+        if "output=xlsx" in url.lower() or url.lower().endswith(".xlsx"):
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                response = requests.get(url, timeout=30)
+                response.raise_for_status()
+                df = pd.read_excel(io.BytesIO(response.content), dtype=str)
+            return _clean_columns(df)
+
+        tables = pd.read_html(url)
+        if tables:
+            df = tables[0]
+            return _clean_columns(df)
+    except Exception:
+        logger.exception("Failed to fetch Google Sheet calling data")
+
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            response = requests.get(url, timeout=30)
+            response.raise_for_status()
+            df = pd.read_excel(io.BytesIO(response.content), dtype=str)
+        return _clean_columns(df)
+    except Exception:
+        logger.exception("Failed to fetch Google Sheet as XLSX fallback")
+
+    return pd.DataFrame()
+
+
+def normalize_google_sheet_headers(df: pd.DataFrame) -> pd.DataFrame:
+    df = normalize_headers(df)
+    df = df.fillna("")
+    if "instant_id" in df.columns and "instance_id" not in df.columns:
+        df["instance_id"] = df["instant_id"]
+    if "remark_status" in df.columns and "remarks_status" not in df.columns:
+        df["remarks_status"] = df["remark_status"]
+    if "branch" not in df.columns:
+        df["branch"] = "Kathmandu"
+    return df
+
+
+def normalize_person_name(value: str) -> str:
+    if pd.isna(value) or str(value).strip() == "":
+        return ""
+    normalized = " ".join(str(value).strip().split())
+    return normalized.title()
+
+
+def derive_sheet_work_status(row: pd.Series) -> str:
+    status = str(row.get("work_status", "")).strip().lower()
+    if status:
+        if "service" in status:
+            return "service_confirm"
+        if "connected" in status and "not" not in status:
+            return "connected"
+        if "not" in status or "no" in status:
+            return "not_connected"
+
+    remarks_status = str(row.get("remarks_status", "")).strip().lower()
+    if remarks_status:
+        if "service" in remarks_status:
+            return "service_confirm"
+        if "quotation" in remarks_status:
+            return "not_connected"
+        if "followup" in remarks_status or "need to followup" in remarks_status:
+            return "not_connected"
+        if "not receive" in remarks_status or "not connected" in remarks_status or "not connect" in remarks_status:
+            return "not_connected"
+        if "called" in remarks_status and "not" not in remarks_status:
+            return "connected"
+
+    remarks = str(row.get("remarks", "")).strip().lower()
+    if remarks:
+        if "service" in remarks:
+            return "service_confirm"
+        if "quotation" in remarks:
+            return "not_connected"
+        if "followup" in remarks or "need to followup" in remarks:
+            return "not_connected"
+        if "not receive" in remarks or "not connected" in remarks or "not connect" in remarks:
+            return "not_connected"
+        if "called" in remarks and "not" not in remarks:
+            return "connected"
+
+    return "not_connected"
+
+
+def prepare_google_sheet_calling_data(raw_df: pd.DataFrame) -> pd.DataFrame:
+    if raw_df.empty:
+        return pd.DataFrame(columns=["date", "branch", "instance_id", "customer_id", "calling_person", "work_status", "remarks_status", "remarks"])
+
+    df = normalize_google_sheet_headers(raw_df.copy())
+    if "branch" in df.columns:
+        kathmandu_mask = df["branch"].astype(str).str.contains("Kathmandu", case=False, na=False)
+        if kathmandu_mask.any():
+            df = df[kathmandu_mask].copy()
+        else:
+            df["branch"] = "Kathmandu"
+    else:
+        df["branch"] = "Kathmandu"
+
+    df["instance_id"] = df.get("instance_id", "").astype(str).fillna("")
+    df["customer_id"] = df["instance_id"]
+    df["calling_person"] = df.get("calling_person", "").astype(str).fillna("").apply(normalize_person_name)
+    df["remarks_status"] = df.get("remarks_status", "").astype(str).fillna("")
+    df["remarks"] = df.get("remarks", "").astype(str).fillna("")
+    df["work_status"] = df.apply(derive_sheet_work_status, axis=1)
+    if "date" in df.columns:
+        df["date"] = df["date"].apply(normalize_date).fillna("")
+    else:
+        df["date"] = ""
+    return df[["date", "branch", "instance_id", "customer_id", "calling_person", "work_status", "remarks_status", "remarks"]]
 
 def clear_report_caches() -> None:
     if hasattr(load_calling_data, "clear"):
@@ -345,7 +473,21 @@ def main():
         calling_df = load_calling_data()
         marketing_df = load_marketing_data()
         payment_df = load_payment_data()
-        branches = ["All Branches"] + load_branches()
+
+        # Attempt to auto-load Kathmandu calling data from the public Google Sheet.
+        sheet_df = pd.DataFrame()
+        try:
+            raw_sheet = fetch_calling_from_sheet(GOOGLE_SHEET_CALLING_URL)
+            if not raw_sheet.empty:
+                prepared = prepare_google_sheet_calling_data(raw_sheet)
+                if not prepared.empty:
+                    calling_df = prepared
+                    sheet_df = prepared
+                    logger.info("Using Google Sheet calling data as primary source (%d rows)", len(prepared))
+        except Exception:
+            logger.exception("Auto-load of Google Sheet failed; falling back to system DB data.")
+
+        branches = ["All Branches"] + (sorted(set(load_branches() + (["Kathmandu"] if not sheet_df.empty else []))))
 
         st.markdown(f"<div class='header-title'>{config.APP_TITLE}</div>", unsafe_allow_html=True)
 
