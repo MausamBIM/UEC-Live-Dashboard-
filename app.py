@@ -410,6 +410,60 @@ def render_payment_dashboard(df: pd.DataFrame) -> None:
         st.plotly_chart(fig, use_container_width=True)
 
 
+def render_team_review_dashboard() -> None:
+    st.header("Team Review: Monthly Calling Performance")
+    agents = [
+        {"agent": "Jyoti", "total_calls": 836, "connected_calls": 676, "calls_per_day": 32},
+        {"agent": "Sneha", "total_calls": 539, "connected_calls": 497, "calls_per_day": 33},
+        {"agent": "Urmila", "total_calls": 237, "connected_calls": 197, "calls_per_day": 8},
+        {"agent": "Shanja", "total_calls": 145, "connected_calls": 128, "calls_per_day": 9},
+    ]
+    df = pd.DataFrame(agents)
+    grand_total_calls = int(df["total_calls"].sum())
+    grand_actual_calls = int(df["connected_calls"].sum())
+
+    col1, col2, col3, col4 = st.columns(4)
+    for idx, agent in enumerate(agents):
+        if idx < 4:
+            col = [col1, col2, col3, col4][idx]
+            col.metric(agent["agent"], f"{agent['total_calls']} calls", f"{agent['connected_calls']} connected")
+
+    st.markdown("---")
+    st.markdown("### Team totals")
+    st.write(f"**Total Calls:** {grand_total_calls}  \
+              **Connected Calls:** {grand_actual_calls}  \
+              **Average Calls/Day:** {df['calls_per_day'].mean():.1f}")
+
+    st.markdown("### Total Calls vs Actual Connected Calls")
+    fig = px.bar(
+        df.melt(id_vars=["agent"], value_vars=["total_calls", "connected_calls"], var_name="call_type", value_name="count"),
+        x="agent",
+        y="count",
+        color="call_type",
+        barmode="group",
+        labels={"agent": "Agent", "count": "Call Count", "call_type": "Type"},
+        color_discrete_map={"total_calls": "#0f4c81", "connected_calls": "#7c9ccf"}
+    )
+    fig.update_layout(title_text="Total Calls vs Actual Connected Calls", legend_title_text="")
+    fig.update_traces(texttemplate="%{y}", textposition="outside")
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.markdown("### Calls Per Day")
+    df_calls_per_day = df.sort_values("calls_per_day", ascending=True)
+    fig2 = px.bar(
+        df_calls_per_day,
+        x="calls_per_day",
+        y="agent",
+        orientation="h",
+        labels={"agent": "Agent", "calls_per_day": "Calls Per Day"},
+        color="calls_per_day",
+        color_continuous_scale=["#2f4f6d", "#8ab6d6"]
+    )
+    fig2.update_layout(title_text="Calls Per Day Efficiency", showlegend=False)
+    fig2.update_traces(texttemplate="%{x}", textposition="outside")
+    st.plotly_chart(fig2, use_container_width=True)
+
+
 def render_comparison_dashboard(calling_df: pd.DataFrame, marketing_df: pd.DataFrame, payment_df: pd.DataFrame, branch: str, month: str) -> None:
     st.subheader(f"Comparison across branches{f' for {month}' if month != 'All' else ''}")
     calling_filtered = filter_dataframe(calling_df, branch, month, "All", "calling_person")
@@ -494,7 +548,7 @@ def main():
         with st.sidebar:
             st.header("Filters")
             branch = st.selectbox("Branch", options=branches)
-            report_type = st.selectbox("Report Type", options=["All", "Calling", "Marketing", "Payment"])
+            report_type = st.selectbox("Report Type", options=["All", "Calling", "Marketing", "Payment", "Team Review"])
             month = st.selectbox("Month", options=build_month_options(calling_df, marketing_df, payment_df))
             person = "All"
             if report_type == "Calling":
@@ -530,6 +584,9 @@ def main():
             df = filter_dataframe(payment_df, branch, month, "All", "customer_name")
             render_payment_dashboard(df)
             render_table(df, ["date", "branch", "customer_name", "status", "payment_received", "os_amount", "next_calling_date", "remarks"], "payment")
+
+        elif report_type == "Team Review":
+            render_team_review_dashboard()
 
         else:
             st.header("Executive Summary")
