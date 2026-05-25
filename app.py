@@ -126,7 +126,7 @@ def derive_sheet_work_status(row: pd.Series) -> str:
 
 def prepare_google_sheet_calling_data(raw_df: pd.DataFrame) -> pd.DataFrame:
     if raw_df.empty:
-        return pd.DataFrame(columns=["date", "branch", "instance_id", "customer_id", "calling_person", "work_status", "remarks_status", "remarks"])
+        return pd.DataFrame(columns=["date", "branch", "instance_id", "customer_id", "customer_name", "contact_name", "address", "contact_number", "calling_person", "work_status", "remarks_status", "remarks"])
 
     df = normalize_google_sheet_headers(raw_df.copy())
     if "branch" in df.columns:
@@ -138,17 +138,50 @@ def prepare_google_sheet_calling_data(raw_df: pd.DataFrame) -> pd.DataFrame:
     else:
         df["branch"] = "Kathmandu"
 
-    df["instance_id"] = df.get("instance_id", "").astype(str).fillna("")
+    def clean_sheet_text(value):
+        if pd.isna(value):
+            return ""
+        text = str(value).strip()
+        if text.lower() in {"nan", "none"}:
+            return ""
+        return text
+
+    df["instance_id"] = df.get(
+        "instance_id",
+        pd.Series([""] * len(df), index=df.index)
+    ).astype(str).fillna("")
     df["customer_id"] = df["instance_id"]
-    df["calling_person"] = df.get("calling_person", "").astype(str).fillna("").apply(normalize_person_name)
-    df["remarks_status"] = df.get("remarks_status", "").astype(str).fillna("")
-    df["remarks"] = df.get("remarks", "").astype(str).fillna("")
+    df["customer_name"] = df.get("company_name", pd.Series([""] * len(df), index=df.index)).apply(clean_sheet_text)
+
+    if "contact_name" in df.columns:
+        df["contact_name"] = df["contact_name"].apply(clean_sheet_text)
+    elif "contact" in df.columns:
+        df["contact_name"] = df["contact"].apply(clean_sheet_text)
+    else:
+        df["contact_name"] = ""
+
+    if "address" in df.columns:
+        df["address"] = df["address"].apply(clean_sheet_text)
+
+    primary_mobile = df.get("primary_mobile", pd.Series([""] * len(df), index=df.index)).apply(clean_sheet_text)
+    if primary_mobile.ne("").any():
+        df["contact_number"] = primary_mobile
+    else:
+        df["contact_number"] = ""
+
+    df["calling_person"] = df.get("calling_person", pd.Series([""] * len(df), index=df.index)).apply(clean_sheet_text).apply(normalize_person_name)
+    df["remarks_status"] = df.get("remarks_status", pd.Series([""] * len(df), index=df.index)).astype(str).fillna("")
+    df["remarks"] = df.get("remarks", pd.Series([""] * len(df), index=df.index)).astype(str).fillna("")
     df["work_status"] = df.apply(derive_sheet_work_status, axis=1)
     if "date" in df.columns:
         df["date"] = df["date"].apply(normalize_date).fillna("")
     else:
         df["date"] = ""
-    return df[["date", "branch", "instance_id", "customer_id", "calling_person", "work_status", "remarks_status", "remarks"]]
+
+    columns = ["date", "branch", "instance_id", "customer_id", "customer_name", "address", "contact_number", "calling_person", "work_status", "remarks_status", "remarks"]
+    if "contact_name" in df.columns:
+        columns.insert(5, "contact_name")
+    return df[columns]
 
 def clear_report_caches() -> None:
     if hasattr(load_calling_data, "clear"):
@@ -510,6 +543,7 @@ def render_table(df: pd.DataFrame, columns: list | None, prefix: str) -> None:
         st.info("No data available for the selected filters.")
         return
     display = df.copy()
+    display.columns = ["COMPANY NAME" if col in {"customer_name", "company_name"} else col for col in display.columns]
     if "date" in display.columns:
         display["date"] = pd.to_datetime(display["date"], errors="coerce").dt.strftime("%Y-%m-%d")
     if "payment_received" in display.columns:
@@ -518,6 +552,8 @@ def render_table(df: pd.DataFrame, columns: list | None, prefix: str) -> None:
         display["os_amount"] = display["os_amount"].apply(format_currency)
     if columns is None:
         columns = list(display.columns)
+    else:
+        columns = ["COMPANY NAME" if col in {"customer_name", "company_name"} else col for col in columns]
     st.dataframe(display[columns], use_container_width=True, hide_index=True)
     render_export_buttons(display[columns], prefix)
 
@@ -569,6 +605,12 @@ def main():
             common_columns = ["date", "branch", "calling_person", "work_status", "remarks_status", "remarks"]
             if "customer_name" in df.columns:
                 common_columns.insert(2, "customer_name")
+                if "contact_name" in df.columns:
+                    common_columns.insert(3, "contact_name")
+                if "address" in df.columns:
+                    common_columns.insert(4, "address")
+                if "contact_number" in df.columns:
+                    common_columns.insert(5, "contact_number")
             if "next_calling_date" in df.columns:
                 common_columns.append("next_calling_date")
             render_table(df, common_columns, "calling")
@@ -577,13 +619,27 @@ def main():
             st.header("Marketing Dashboard")
             df = filter_dataframe(marketing_df, branch, month, person, "marketing_person")
             render_marketing_dashboard(df)
-            render_table(df, ["date", "branch", "customer_name", "marketing_person", "segment", "outcome", "remarks", "final_remarks"], "marketing")
+            marketing_columns = ["date", "branch", "customer_name", "marketing_person", "segment", "outcome", "remarks", "final_remarks"]
+            if "contact_name" in df.columns:
+                marketing_columns.insert(3, "contact_name")
+            if "address" in df.columns:
+                marketing_columns.insert(4, "address")
+            if "contact_number" in df.columns:
+                marketing_columns.insert(5, "contact_number")
+            render_table(df, marketing_columns, "marketing")
 
         elif report_type == "Payment":
             st.header("Payment Dashboard")
             df = filter_dataframe(payment_df, branch, month, "All", "customer_name")
             render_payment_dashboard(df)
-            render_table(df, ["date", "branch", "customer_name", "status", "payment_received", "os_amount", "next_calling_date", "remarks"], "payment")
+            payment_columns = ["date", "branch", "customer_name", "status", "payment_received", "os_amount", "next_calling_date", "remarks"]
+            if "contact_name" in df.columns:
+                payment_columns.insert(3, "contact_name")
+            if "address" in df.columns:
+                payment_columns.insert(4, "address")
+            if "contact_number" in df.columns:
+                payment_columns.insert(5, "contact_number")
+            render_table(df, payment_columns, "payment")
 
         elif report_type == "Team Review":
             render_team_review_dashboard()
