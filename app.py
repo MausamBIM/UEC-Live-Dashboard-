@@ -86,39 +86,99 @@ def normalize_person_name(value: str) -> str:
 
 
 def derive_sheet_work_status(row: pd.Series) -> str:
-    status = str(row.get("work_status", "")).strip().lower()
-    if status:
-        if "service" in status:
+    def normalize_text(value) -> str:
+        if pd.isna(value):
+            return ""
+        return str(value).strip().lower()
+
+    def contains_any(text: str, keywords: tuple[str, ...]) -> bool:
+        return any(keyword in text for keyword in keywords)
+
+    explicit_status = normalize_text(row.get("work_status"))
+    if explicit_status:
+        if "service" in explicit_status:
             return "service_confirm"
-        if "connected" in status and "not" not in status:
+        if "connected" in explicit_status and "not" not in explicit_status:
             return "connected"
-        if "not" in status or "no" in status:
+        if "not" in explicit_status or "no" in explicit_status:
             return "not_connected"
 
-    remarks_status = str(row.get("remarks_status", "")).strip().lower()
+    remarks_status = normalize_text(row.get("remarks_status"))
+    remarks = normalize_text(row.get("remarks"))
+
+    service_keywords = (
+        "service confirm",
+        "service_confirm",
+        "service confirmed",
+        "service done",
+        "service completed",
+        "service provided",
+        "confirmed service",
+        "agreed service",
+        "service order",
+        "booked service",
+        "customer agreed service",
+    )
+    connected_keywords = (
+        "connected",
+        "spoke",
+        "talked",
+        "answered",
+        "customer available",
+        "customer answered",
+        "reachable",
+        "talk to customer",
+        "customer wants visit",
+        "wants visit",
+        "need visit",
+        "visit",
+        "will visit",
+        "agreed",
+        "ok",
+    )
+    not_connected_keywords = (
+        "not connected",
+        "not connect",
+        "not receive",
+        "not received",
+        "no answer",
+        "no response",
+        "switch off",
+        "switched off",
+        "network problem",
+        "network issue",
+        "call cut",
+        "call cut off",
+        "cut off",
+        "line busy",
+        "busy",
+        "number busy",
+        "wrong number",
+        "unreachable",
+        "out of coverage",
+        "no coverage",
+        "not reachable",
+        "customer unavailable",
+        "customer not available",
+        "followup",
+        "need to followup",
+        "quotation",
+    )
+
     if remarks_status:
-        if "service" in remarks_status:
+        if contains_any(remarks_status, service_keywords):
             return "service_confirm"
-        if "quotation" in remarks_status:
+        if contains_any(remarks_status, not_connected_keywords):
             return "not_connected"
-        if "followup" in remarks_status or "need to followup" in remarks_status:
-            return "not_connected"
-        if "not receive" in remarks_status or "not connected" in remarks_status or "not connect" in remarks_status:
-            return "not_connected"
-        if "called" in remarks_status and "not" not in remarks_status:
+        if contains_any(remarks_status, connected_keywords):
             return "connected"
 
-    remarks = str(row.get("remarks", "")).strip().lower()
     if remarks:
-        if "service" in remarks:
+        if contains_any(remarks, service_keywords):
             return "service_confirm"
-        if "quotation" in remarks:
+        if contains_any(remarks, not_connected_keywords):
             return "not_connected"
-        if "followup" in remarks or "need to followup" in remarks:
-            return "not_connected"
-        if "not receive" in remarks or "not connected" in remarks or "not connect" in remarks:
-            return "not_connected"
-        if "called" in remarks and "not" not in remarks:
+        if contains_any(remarks, connected_keywords):
             return "connected"
 
     return "not_connected"
@@ -126,7 +186,7 @@ def derive_sheet_work_status(row: pd.Series) -> str:
 
 def prepare_google_sheet_calling_data(raw_df: pd.DataFrame) -> pd.DataFrame:
     if raw_df.empty:
-        return pd.DataFrame(columns=["date", "branch", "instance_id", "customer_id", "customer_name", "contact_name", "address", "contact_number", "calling_person", "work_status", "remarks_status", "remarks"])
+        return pd.DataFrame(columns=["date", "branch", "instance_id", "customer_id", "customer_name", "contact_name", "address", "contact_number", "calling_person", "work_status", "remarks_status", "remarks", "service_lead"])
 
     df = normalize_google_sheet_headers(raw_df.copy())
     if "branch" in df.columns:
@@ -170,6 +230,7 @@ def prepare_google_sheet_calling_data(raw_df: pd.DataFrame) -> pd.DataFrame:
         df["contact_number"] = ""
 
     df["calling_person"] = df.get("calling_person", pd.Series([""] * len(df), index=df.index)).apply(clean_sheet_text).apply(normalize_person_name)
+    df["service_lead"] = df.get("service_lead", pd.Series([""] * len(df), index=df.index)).apply(clean_sheet_text)
     df["remarks_status"] = df.get("remarks_status", pd.Series([""] * len(df), index=df.index)).astype(str).fillna("")
     df["remarks"] = df.get("remarks", pd.Series([""] * len(df), index=df.index)).astype(str).fillna("")
     df["work_status"] = df.apply(derive_sheet_work_status, axis=1)
@@ -178,7 +239,7 @@ def prepare_google_sheet_calling_data(raw_df: pd.DataFrame) -> pd.DataFrame:
     else:
         df["date"] = ""
 
-    columns = ["date", "branch", "instance_id", "customer_id", "customer_name", "address", "contact_number", "calling_person", "work_status", "remarks_status", "remarks"]
+    columns = ["date", "branch", "instance_id", "customer_id", "customer_name", "address", "contact_number", "calling_person", "work_status", "remarks_status", "remarks", "service_lead"]
     if "contact_name" in df.columns:
         columns.insert(5, "contact_name")
     return df[columns]
@@ -287,6 +348,35 @@ def filter_dataframe(df: pd.DataFrame, branch: str, month: str, person: str, per
     return filtered
 
 
+def normalize_service_lead(value) -> str:
+    if pd.isna(value):
+        return ""
+    text = str(value).strip()
+    if text.lower() in {"", "nan", "none"}:
+        return ""
+    return text
+
+
+def get_calling_rows(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df.copy()
+    result = df.copy()
+    if "service_lead" not in result.columns:
+        return result
+    result["service_lead"] = result["service_lead"].apply(normalize_service_lead)
+    return result[result["service_lead"] == ""].copy()
+
+
+def get_lead_rows(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df.copy()
+    result = df.copy()
+    if "service_lead" not in result.columns:
+        return result.iloc[0:0].copy()
+    result["service_lead"] = result["service_lead"].apply(normalize_service_lead)
+    return result[result["service_lead"] != ""].copy()
+
+
 def render_export_buttons(df: pd.DataFrame, prefix: str) -> None:
     if df.empty:
         st.info("No data available for export.")
@@ -313,31 +403,51 @@ def render_export_buttons(df: pd.DataFrame, prefix: str) -> None:
 
 
 def get_calling_metrics(df: pd.DataFrame) -> dict:
+    calling_df = get_calling_rows(df)
     status_by_person = pd.DataFrame()
     remarks_status_counts = pd.DataFrame()
-    if not df.empty and "remarks_status" in df.columns:
+    if not calling_df.empty and "remarks_status" in calling_df.columns:
         status_by_person = (
-            df.groupby(["calling_person", "remarks_status"]).size()
+            calling_df.groupby(["calling_person", "remarks_status"]).size()
               .reset_index(name="count")
               .sort_values(["calling_person", "count"], ascending=[True, False])
         )
         remarks_status_counts = (
-            df["remarks_status"].fillna("Unknown")
+            calling_df["remarks_status"].fillna("Unknown")
               .value_counts()
               .reset_index(name="count")
               .rename(columns={"index": "remarks_status"})
         )
 
     return {
-        "total_calls": int(len(df)),
-        "total_not_connected": int(len(df[df["work_status"] == "not_connected"])),
-        "total_service_confirm": int(len(df[df["work_status"] == "service_confirm"])),
-        "total_quotation_sent": int(len(df[df["remarks_status"].astype(str).str.contains("quotation", case=False, na=False)])) if "remarks_status" in df.columns else 0,
-        "total_followup": int(len(df[df["remarks_status"].astype(str).str.contains("followup", case=False, na=False)])) if "remarks_status" in df.columns else 0,
-        "unique_customers_called": int(df["customer_id"].nunique()) if "customer_id" in df.columns else 0,
-        "calls_per_person": df.groupby("calling_person").size().reset_index(name="calls").sort_values("calls", ascending=False),
+        "total_calls": int(len(calling_df)),
+        "total_not_connected": int(len(calling_df[calling_df["work_status"] == "not_connected"])),
+        "total_service_confirm": int(len(calling_df[calling_df["work_status"] == "service_confirm"])),
+        "total_quotation_sent": int(len(calling_df[calling_df["remarks_status"].astype(str).str.contains("quotation", case=False, na=False)])) if "remarks_status" in calling_df.columns else 0,
+        "total_followup": int(len(calling_df[calling_df["remarks_status"].astype(str).str.contains("followup", case=False, na=False)])) if "remarks_status" in calling_df.columns else 0,
+        "unique_customers_called": int(calling_df["customer_id"].nunique()) if "customer_id" in calling_df.columns else 0,
+        "calls_per_person": calling_df.groupby("calling_person").size().reset_index(name="calls").sort_values("calls", ascending=False),
         "status_by_person": status_by_person,
         "remarks_status_counts": remarks_status_counts
+    }
+
+
+def get_lead_metrics(df: pd.DataFrame) -> dict:
+    lead_df = get_lead_rows(df)
+    lead_counts = pd.DataFrame()
+    if not lead_df.empty:
+        lead_counts = (
+            lead_df.groupby(["service_lead", "calling_person"]).size()
+              .reset_index(name="leads")
+              .sort_values(["service_lead", "leads"], ascending=[True, False])
+        )
+
+    return {
+        "total_leads": int(len(lead_df)),
+        "unique_customers": int(lead_df["customer_id"].nunique()) if "customer_id" in lead_df.columns else 0,
+        "leads_by_service": lead_df.groupby("service_lead").size().reset_index(name="leads").sort_values("leads", ascending=False),
+        "leads_by_person": lead_df.groupby("calling_person").size().reset_index(name="leads").sort_values("leads", ascending=False),
+        "lead_breakdown": lead_counts
     }
 
 
@@ -399,6 +509,33 @@ def render_calling_dashboard(df: pd.DataFrame) -> None:
     if "status_by_person" in metrics and not metrics["status_by_person"].empty:
         fig = px.bar(metrics["status_by_person"], x="calling_person", y="count", color="remarks_status", barmode="group", labels={"calling_person": "Calling Person", "count": "Calls", "remarks_status": "Remark Status"})
         st.plotly_chart(fig, use_container_width=True)
+
+
+def render_lead_management_dashboard(df: pd.DataFrame) -> None:
+    st.subheader("Lead Management")
+    lead_df = get_lead_rows(df)
+    metrics = get_lead_metrics(lead_df)
+
+    if lead_df.empty:
+        st.info("No service lead records found for the selected filters.")
+        return
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Total Leads", metrics["total_leads"])
+    col2.metric("Unique Customers", metrics["unique_customers"])
+    col3.metric("Lead Sources", int(metrics["leads_by_service"].shape[0]))
+
+    st.markdown("### Leads by Source")
+    fig = px.bar(metrics["leads_by_service"], x="service_lead", y="leads", labels={"service_lead": "Service Lead", "leads": "Leads"})
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.markdown("### Leads by Calling Person")
+    if not metrics["leads_by_person"].empty:
+        fig = px.bar(metrics["leads_by_person"], x="calling_person", y="leads", labels={"calling_person": "Calling Person", "leads": "Leads"})
+        st.plotly_chart(fig, use_container_width=True)
+
+    lead_columns = ["date", "branch", "customer_name", "contact_name", "address", "contact_number", "calling_person", "service_lead", "remarks_status", "remarks"]
+    render_table(lead_df, lead_columns, "lead_management")
 
 
 def render_marketing_dashboard(df: pd.DataFrame) -> None:
@@ -581,14 +718,17 @@ def main():
 
         st.markdown(f"<div class='header-title'>{config.APP_TITLE}</div>", unsafe_allow_html=True)
 
+        calling_rows = get_calling_rows(calling_df)
+        lead_rows = get_lead_rows(calling_df)
+
         with st.sidebar:
             st.header("Filters")
             branch = st.selectbox("Branch", options=branches)
-            report_type = st.selectbox("Report Type", options=["All", "Calling", "Marketing", "Payment", "Team Review"])
+            report_type = st.selectbox("Report Type", options=["All", "Calling", "Lead Management", "Marketing", "Payment", "Team Review"])
             month = st.selectbox("Month", options=build_month_options(calling_df, marketing_df, payment_df))
             person = "All"
             if report_type == "Calling":
-                person = st.selectbox("Calling Person", options=["All"] + sorted(calling_df["calling_person"].dropna().unique()))
+                person = st.selectbox("Calling Person", options=["All"] + sorted(calling_rows["calling_person"].dropna().unique()))
             elif report_type == "Marketing":
                 person = st.selectbox("Marketing Person", options=["All"] + sorted(marketing_df["marketing_person"].dropna().unique()))
 
@@ -600,7 +740,7 @@ def main():
 
         if report_type == "Calling":
             st.header("Calling Dashboard")
-            df = filter_dataframe(calling_df, branch, month, person, "calling_person")
+            df = filter_dataframe(calling_rows, branch, month, person, "calling_person")
             render_calling_dashboard(df)
             common_columns = ["date", "branch", "calling_person", "work_status", "remarks_status", "remarks"]
             if "customer_name" in df.columns:
@@ -614,6 +754,11 @@ def main():
             if "next_calling_date" in df.columns:
                 common_columns.append("next_calling_date")
             render_table(df, common_columns, "calling")
+
+        elif report_type == "Lead Management":
+            st.header("Lead Management")
+            df = filter_dataframe(lead_rows, branch, month, "All", "calling_person")
+            render_lead_management_dashboard(df)
 
         elif report_type == "Marketing":
             st.header("Marketing Dashboard")
